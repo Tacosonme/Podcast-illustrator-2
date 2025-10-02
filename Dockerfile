@@ -16,11 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Copy start script
+COPY start.sh .
+RUN chmod +x start.sh
+
 # Create uploads directory
 RUN mkdir -p /tmp/uploads
 
-# Expose port (Railway will set PORT environment variable)
-EXPOSE 8080
-
-# Start command - Railway will provide PORT as environment variable
-CMD gunicorn main:app --bind 0.0.0.0:${PORT:-8080}
+# Start command using bash script
+CMD ["./start.sh"]
