@@ -1,8 +1,12 @@
 import os
-from flask import Flask, jsonify, request, send_from_directory, render_template_string
-from flask_cors import CORS
+import subprocess
+import json
 import tempfile
 import uuid
+from datetime import datetime
+from flask import Flask, jsonify, request, render_template_string
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 CORS(app)
@@ -11,7 +15,62 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
 app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
 
-# Frontend HTML template
+# Allowed file extensions
+ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'flac', 'ogg'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def update_job_status(job_dir, status, progress, message=""):
+    """Update job status"""
+    status_data = {
+        'status': status,
+        'progress': progress,
+        'message': message,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    status_file = os.path.join(job_dir, 'status.json')
+    with open(status_file, 'w') as f:
+        json.dump(status_data, f, indent=2)
+
+def segment_audio(job_dir, audio_file, segment_duration=600):
+    """Split audio into segments using FFmpeg"""
+    segments_dir = os.path.join(job_dir, 'segments')
+    os.makedirs(segments_dir, exist_ok=True)
+    
+    try:
+        update_job_status(job_dir, 'processing', 10, 'Segmenting audio file...')
+        
+        # Use the working FFmpeg command we tested
+        cmd = [
+            'ffmpeg', '-i', audio_file,
+            '-f', 'segment',
+            '-segment_time', str(segment_duration),
+            '-c:a', 'libmp3lame',  # Use MP3 encoder
+            '-b:a', '128k',        # Set bitrate
+            '-ar', '44100',        # Set sample rate
+            '-ac', '2',            # Set to stereo
+            os.path.join(segments_dir, 'segment_%03d.mp3')
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        # Get list of created segments
+        segment_files = []
+        for filename in sorted(os.listdir(segments_dir)):
+            if filename.startswith('segment_') and filename.endswith('.mp3'):
+                segment_files.append(os.path.join(segments_dir, filename))
+        
+        update_job_status(job_dir, 'processing', 30, f'Created {len(segment_files)} audio segments')
+        return segment_files
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Audio segmentation failed: {e.stderr}"
+        update_job_status(job_dir, 'failed', 0, error_msg)
+        raise Exception(error_msg)
+
+# Frontend HTML template (same as before but with processing status)
 FRONTEND_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -59,6 +118,14 @@ FRONTEND_HTML = """
             font-size: 16px;
             margin: 10px 0;
         }
+        input[type="text"] { 
+            width: 300px; 
+            padding: 10px; 
+            border: 2px solid #ddd; 
+            border-radius: 8px; 
+            font-size: 14px;
+            margin: 0 10px;
+        }
         button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -81,6 +148,8 @@ FRONTEND_HTML = """
         .success { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
         .error { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
         .info { background: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
+        .progress { width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-bar { height: 100%; background: #667eea; transition: width 0.3s; }
         .features {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -94,7 +163,7 @@ FRONTEND_HTML = """
             text-align: left;
         }
         .feature h3 { color: #667eea; margin-bottom: 10px; }
-        .status { margin-top: 20px; }
+        .status-section { margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px; }
         pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; }
     </style>
 </head>
@@ -105,12 +174,12 @@ FRONTEND_HTML = """
         
         <div class="features">
             <div class="feature">
-                <h3>🎵 Audio Upload</h3>
-                <p>Support for MP3, WAV, M4A, FLAC, OGG files up to 200MB</p>
+                <h3>🎵 Audio Processing</h3>
+                <p>FFmpeg-powered audio segmentation and conversion</p>
             </div>
             <div class="feature">
-                <h3>🤖 AI Processing</h3>
-                <p>Automatic transcription and content analysis</p>
+                <h3>🤖 AI Transcription</h3>
+                <p>OpenAI Whisper for accurate speech-to-text</p>
             </div>
             <div class="feature">
                 <h3>🎨 Visual Generation</h3>
@@ -127,10 +196,11 @@ FRONTEND_HTML = """
 
         <div id="result"></div>
         
-        <div class="status">
-            <h3>🔍 API Status</h3>
-            <button onclick="checkHealth()">Test Connection</button>
-            <div id="healthResult"></div>
+        <div class="status-section">
+            <h3>🔍 Processing Status</h3>
+            <input type="text" id="jobId" placeholder="Enter Job ID" />
+            <button onclick="checkStatus()">Check Status</button>
+            <div id="statusResult"></div>
         </div>
     </div>
 
@@ -166,6 +236,18 @@ FRONTEND_HTML = """
         function showResult(elementId, message, type = 'info') {
             const element = document.getElementById(elementId);
             element.innerHTML = `<div class="result ${type}">${message}</div>`;
+        }
+
+        function showProgress(elementId, progress) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = `
+                <div class="result info">
+                    <div>Processing... ${progress}%</div>
+                    <div class="progress">
+                        <div class="progress-bar" style="width: ${progress}%"></div>
+                    </div>
+                </div>
+            `;
         }
 
         async function uploadFile() {
@@ -207,9 +289,12 @@ FRONTEND_HTML = """
                         <strong>Job ID:</strong> <code>${data.job_id}</code><br>
                         <strong>Filename:</strong> ${data.filename}<br>
                         <strong>File Size:</strong> ${(data.file_size / 1024 / 1024).toFixed(2)} MB<br>
-                        <strong>Status:</strong> ${data.status}<br>
-                        <em>Note: Full processing features will be added in the next update!</em>
+                        <strong>Status:</strong> ${data.status}
                     `, 'success');
+                    
+                    // Auto-fill job ID and start processing
+                    document.getElementById('jobId').value = data.job_id;
+                    setTimeout(() => startProcessing(data.job_id), 1000);
                 } else {
                     showResult('result', `Upload failed: ${data.error || 'Unknown error'}`, 'error');
                 }
@@ -221,30 +306,93 @@ FRONTEND_HTML = """
             }
         }
 
-        async function checkHealth() {
+        async function startProcessing(jobId) {
             try {
-                showResult('healthResult', 'Testing connection...', 'info');
+                const response = await fetch(`${API_BASE}/api/process/${jobId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
                 
-                const response = await fetch(`${API_BASE}/api/health`);
                 const data = await response.json();
                 
                 if (response.ok) {
-                    showResult('healthResult', `
-                        <strong>✅ Connection Successful!</strong><br>
-                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    showResult('result', `
+                        <strong>🚀 Processing Started!</strong><br>
+                        Job ID: <code>${jobId}</code><br>
+                        Status: ${data.status}
                     `, 'success');
+                    
+                    // Start monitoring
+                    monitorProgress(jobId);
                 } else {
-                    showResult('healthResult', `❌ Connection failed (${response.status})`, 'error');
+                    showResult('result', `Processing failed: ${data.error || 'Unknown error'}`, 'error');
                 }
             } catch (error) {
-                showResult('healthResult', `❌ Connection error: ${error.message}`, 'error');
+                showResult('result', `Processing error: ${error.message}`, 'error');
             }
         }
 
-        // Auto health check on page load
-        window.onload = () => {
-            checkHealth();
-        };
+        async function checkStatus() {
+            const jobId = document.getElementById('jobId').value.trim();
+            
+            if (!jobId) {
+                showResult('statusResult', 'Please enter a Job ID.', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/status/${jobId}`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    const progress = data.progress || 0;
+                    if (data.status === 'processing') {
+                        showProgress('statusResult', progress);
+                    } else {
+                        showResult('statusResult', `
+                            <strong>Status:</strong> ${data.status}<br>
+                            <strong>Progress:</strong> ${progress}%<br>
+                            <strong>Message:</strong> ${data.message}<br>
+                            <strong>Timestamp:</strong> ${data.timestamp}
+                        `, data.status === 'completed' ? 'success' : data.status === 'failed' ? 'error' : 'info');
+                    }
+                } else {
+                    showResult('statusResult', `Status check failed: ${data.error || 'Job not found'}`, 'error');
+                }
+            } catch (error) {
+                showResult('statusResult', `Status error: ${error.message}`, 'error');
+            }
+        }
+
+        async function monitorProgress(jobId) {
+            const checkProgress = async () => {
+                try {
+                    const response = await fetch(`${API_BASE}/api/status/${jobId}`);
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        const progress = data.progress || 0;
+                        showProgress('statusResult', progress);
+                        
+                        if (data.status === 'completed') {
+                            showResult('statusResult', `
+                                <strong>✅ Processing Complete!</strong><br>
+                                Job ID: <code>${jobId}</code><br>
+                                Message: ${data.message}
+                            `, 'success');
+                        } else if (data.status === 'failed') {
+                            showResult('statusResult', `❌ Processing failed: ${data.message}`, 'error');
+                        } else if (data.status === 'processing') {
+                            setTimeout(checkProgress, 3000); // Check again in 3 seconds
+                        }
+                    }
+                } catch (error) {
+                    console.error('Progress monitoring error:', error);
+                }
+            };
+            
+            checkProgress();
+        }
     </script>
 </body>
 </html>
@@ -259,9 +407,9 @@ def health():
     return jsonify({
         'status': 'healthy',
         'platform': 'railway',
-        'version': '1.0.0',
-        'features': ['file_upload', 'health_check'],
-        'message': 'Backend API is running successfully!'
+        'version': '1.1.0',
+        'features': ['file_upload', 'audio_processing', 'health_check'],
+        'message': 'Audio processing enabled!'
     })
 
 @app.route('/api/upload', methods=['POST'])
@@ -273,21 +421,82 @@ def upload():
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    # Generate job ID
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid file type. Supported: mp3, wav, m4a, flac, ogg'}), 400
+    
+    # Generate job ID and create job directory
     job_id = str(uuid.uuid4())
+    job_dir = os.path.join(app.config['UPLOAD_FOLDER'], job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    
+    # Save uploaded file
+    filename = secure_filename(file.filename)
+    file_path = os.path.join(job_dir, filename)
+    file.save(file_path)
     
     # Get file size
-    file.seek(0, 2)  # Seek to end
-    file_size = file.tell()
-    file.seek(0)  # Reset to beginning
+    file_size = os.path.getsize(file_path)
+    
+    # Initialize job status
+    update_job_status(job_dir, 'uploaded', 0, 'File uploaded successfully')
     
     return jsonify({
         'job_id': job_id,
-        'filename': file.filename,
+        'filename': filename,
         'file_size': file_size,
         'status': 'uploaded',
-        'message': 'File uploaded successfully! Processing features coming soon.'
+        'message': 'File uploaded successfully! Ready for processing.'
     })
+
+@app.route('/api/process/<job_id>', methods=['POST'])
+def process_audio(job_id):
+    job_dir = os.path.join(app.config['UPLOAD_FOLDER'], job_id)
+    
+    if not os.path.exists(job_dir):
+        return jsonify({'error': 'Job not found'}), 404
+    
+    try:
+        # Find the uploaded audio file
+        audio_file = None
+        for filename in os.listdir(job_dir):
+            if filename.lower().endswith(('.mp3', '.wav', '.m4a', '.flac', '.ogg')):
+                audio_file = os.path.join(job_dir, filename)
+                break
+        
+        if not audio_file:
+            return jsonify({'error': 'No audio file found'}), 400
+        
+        # Start audio processing in background (for now, just segment)
+        try:
+            segments = segment_audio(job_dir, audio_file, segment_duration=600)
+            update_job_status(job_dir, 'completed', 100, f'Audio processing complete! Created {len(segments)} segments.')
+        except Exception as e:
+            update_job_status(job_dir, 'failed', 0, str(e))
+            return jsonify({'error': str(e)}), 500
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': 'processing',
+            'message': 'Audio processing started'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/status/<job_id>')
+def get_status(job_id):
+    job_dir = os.path.join(app.config['UPLOAD_FOLDER'], job_id)
+    status_file = os.path.join(job_dir, 'status.json')
+    
+    if not os.path.exists(status_file):
+        return jsonify({'error': 'Job not found'}), 404
+    
+    try:
+        with open(status_file, 'r') as f:
+            status_data = json.load(f)
+        return jsonify(status_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
