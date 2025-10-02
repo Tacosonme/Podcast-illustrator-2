@@ -42,15 +42,15 @@ def segment_audio(job_dir, audio_file, segment_duration=600):
     try:
         update_job_status(job_dir, 'processing', 10, 'Segmenting audio file...')
         
-        # Use the working FFmpeg command we tested
+        # Use the working FFmpeg command
         cmd = [
             'ffmpeg', '-i', audio_file,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
-            '-c:a', 'libmp3lame',  # Use MP3 encoder
-            '-b:a', '128k',        # Set bitrate
-            '-ar', '44100',        # Set sample rate
-            '-ac', '2',            # Set to stereo
+            '-c:a', 'libmp3lame',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-ac', '2',
             os.path.join(segments_dir, 'segment_%03d.mp3')
         ]
         
@@ -70,8 +70,8 @@ def segment_audio(job_dir, audio_file, segment_duration=600):
         update_job_status(job_dir, 'failed', 0, error_msg)
         raise Exception(error_msg)
 
-# Frontend HTML template (same as before but with processing status)
-FRONTEND_HTML = """
+# Frontend HTML template
+FRONTEND_HTML = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -109,7 +109,6 @@ FRONTEND_HTML = """
             transition: all 0.3s ease;
         }
         .upload-area:hover { border-color: #667eea; background: #f0f4ff; }
-        .upload-area.dragover { border-color: #667eea; background: #e8f2ff; }
         input[type="file"] { 
             width: 100%; 
             padding: 15px; 
@@ -164,7 +163,6 @@ FRONTEND_HTML = """
         }
         .feature h3 { color: #667eea; margin-bottom: 10px; }
         .status-section { margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px; }
-        pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; }
     </style>
 </head>
 <body>
@@ -179,15 +177,15 @@ FRONTEND_HTML = """
             </div>
             <div class="feature">
                 <h3>🤖 AI Transcription</h3>
-                <p>OpenAI Whisper for accurate speech-to-text</p>
+                <p>OpenAI Whisper for accurate speech-to-text (coming soon)</p>
             </div>
             <div class="feature">
                 <h3>🎨 Visual Generation</h3>
-                <p>AI-generated images synchronized with audio</p>
+                <p>AI-generated images synchronized with audio (coming soon)</p>
             </div>
         </div>
 
-        <div class="upload-area" id="uploadArea">
+        <div class="upload-area">
             <h3>📁 Upload Your Podcast</h3>
             <p>Drag and drop your audio file here, or click to browse</p>
             <input type="file" id="audioFile" accept="audio/*" />
@@ -206,32 +204,6 @@ FRONTEND_HTML = """
 
     <script>
         const API_BASE = window.location.origin;
-        
-        // Drag and drop functionality
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('audioFile');
-        
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-        
-        uploadArea.addEventListener('dragleave', () => {
-            uploadArea.classList.remove('dragover');
-        });
-        
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                fileInput.files = files;
-            }
-        });
-        
-        uploadArea.addEventListener('click', () => {
-            fileInput.click();
-        });
 
         function showResult(elementId, message, type = 'info') {
             const element = document.getElementById(elementId);
@@ -292,7 +264,6 @@ FRONTEND_HTML = """
                         <strong>Status:</strong> ${data.status}
                     `, 'success');
                     
-                    // Auto-fill job ID and start processing
                     document.getElementById('jobId').value = data.job_id;
                     setTimeout(() => startProcessing(data.job_id), 1000);
                 } else {
@@ -322,7 +293,6 @@ FRONTEND_HTML = """
                         Status: ${data.status}
                     `, 'success');
                     
-                    // Start monitoring
                     monitorProgress(jobId);
                 } else {
                     showResult('result', `Processing failed: ${data.error || 'Unknown error'}`, 'error');
@@ -383,7 +353,7 @@ FRONTEND_HTML = """
                         } else if (data.status === 'failed') {
                             showResult('statusResult', `❌ Processing failed: ${data.message}`, 'error');
                         } else if (data.status === 'processing') {
-                            setTimeout(checkProgress, 3000); // Check again in 3 seconds
+                            setTimeout(checkProgress, 3000);
                         }
                     }
                 } catch (error) {
@@ -396,7 +366,7 @@ FRONTEND_HTML = """
     </script>
 </body>
 </html>
-"""
+'''
 
 @app.route('/')
 def home():
@@ -408,8 +378,8 @@ def health():
         'status': 'healthy',
         'platform': 'railway',
         'version': '1.1.0',
-        'features': ['file_upload', 'audio_processing', 'health_check'],
-        'message': 'Audio processing enabled!'
+        'features': ['file_upload', 'audio_processing', 'ffmpeg'],
+        'message': 'Audio processing with FFmpeg enabled!'
     })
 
 @app.route('/api/upload', methods=['POST'])
@@ -424,20 +394,16 @@ def upload():
     if not allowed_file(file.filename):
         return jsonify({'error': 'Invalid file type. Supported: mp3, wav, m4a, flac, ogg'}), 400
     
-    # Generate job ID and create job directory
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(app.config['UPLOAD_FOLDER'], job_id)
     os.makedirs(job_dir, exist_ok=True)
     
-    # Save uploaded file
     filename = secure_filename(file.filename)
     file_path = os.path.join(job_dir, filename)
     file.save(file_path)
     
-    # Get file size
     file_size = os.path.getsize(file_path)
     
-    # Initialize job status
     update_job_status(job_dir, 'uploaded', 0, 'File uploaded successfully')
     
     return jsonify({
@@ -456,7 +422,6 @@ def process_audio(job_id):
         return jsonify({'error': 'Job not found'}), 404
     
     try:
-        # Find the uploaded audio file
         audio_file = None
         for filename in os.listdir(job_dir):
             if filename.lower().endswith(('.mp3', '.wav', '.m4a', '.flac', '.ogg')):
@@ -466,7 +431,6 @@ def process_audio(job_id):
         if not audio_file:
             return jsonify({'error': 'No audio file found'}), 400
         
-        # Start audio processing in background (for now, just segment)
         try:
             segments = segment_audio(job_dir, audio_file, segment_duration=600)
             update_job_status(job_dir, 'completed', 100, f'Audio processing complete! Created {len(segments)} segments.')
@@ -501,4 +465,3 @@ def get_status(job_id):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
