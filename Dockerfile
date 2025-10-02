@@ -19,8 +19,8 @@ COPY . .
 # Create uploads directory
 RUN mkdir -p /tmp/uploads
 
-# Expose port
-EXPOSE $PORT
+# Expose port (Railway will set PORT environment variable)
+EXPOSE 8080
 
-# Start command
-CMD gunicorn main:app --bind 0.0.0.0:$PORT
+# Start command - Railway will provide PORT as environment variable
+CMD gunicorn main:app --bind 0.0.0.0:${PORT:-8080}
